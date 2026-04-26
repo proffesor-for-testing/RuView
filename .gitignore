@@ -252,3 +252,8 @@ firmware/esp32-csi-node/build_firmware.batdata/
 models/
 demo_pointcloud.ply
 demo_splats.json
+
+# Agentic QE
+.agentic-qe/
+*.db
+.DS_Store
