@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`nvsim` crate — deterministic NV-diamond magnetometer pipeline simulator** (ADR-089) —
+  New standalone leaf crate at `v2/crates/nvsim` modeling a forward-only
+  magnetic sensing path: scene → source synthesis (Biot–Savart, dipole,
+  current loop, ferrous induced moment) → material attenuation
+  (Air/Drywall/Brick/Concrete/Reinforced/SteelSheet) → NV ensemble
+  (4 〈111〉 axes, ODMR linear-readout proxy, shot-noise floor per
+  Wolf 2015 / Barry 2020) → 16-bit ADC + lock-in demodulation →
+  fixed-layout `MagFrame` records → SHA-256 witness. Six-pass build
+  per `docs/research/quantum-sensing/15-nvsim-implementation-plan.md`.
+  50 tests, ~4.5 M samples/s on x86_64 (4500× the Cortex-A53 1 kHz
+  acceptance gate), pinned reference witness
+  `cc8de9b01b0ff5bd97a6c17848a3f156c174ea7589d0888164a441584ec593b4`
+  for byte-equivalence regression. WASM-ready by construction
+  (zero `std::time/fs/env/process/thread`); builds cleanly for
+  `wasm32-unknown-unknown`. ADR-090 (Proposed, conditional) tracks the
+  optional Lindblad/Hamiltonian extension if AC magnetometry, MW power
+  saturation, hyperfine spectroscopy, or pulsed protocols become required.
+
 ### Fixed
 - **Ghost skeletons in live UI with multi-node ESP32 setups** (#420, ADR-082) —
   `tracker_bridge::tracker_to_person_detections` documented itself as filtering
@@ -148,7 +167,11 @@ firing cleanly, HEALTH mesh packets sent.
   Kconfig surface added under "Adaptive Controller (ADR-081)".
 
 ### Fixed
-- **`provision.py` esptool v5 compat** (#391) — Stale `write_flash` (underscore) syntax in the dry-run manual-flash hint now uses `write-flash` (hyphenated) for esptool >= 5.x. The primary flash command was already correct.
+- **Firmware: SPI flash cache crash under high CSI callback pressure** (RuView#396, #397) — ESP32-S3 nodes crashed in `cache_ll_l1_resume_icache` / `wDev_ProcessFiq` after ~2400 callbacks when the promiscuous filter admitted DATA frames at 100–500 Hz. Fixed by narrowing the filter mask to `WIFI_PROMIS_FILTER_MASK_MGMT` (~10 Hz beacons), adding a 50 Hz early callback rate gate (`CSI_MIN_PROCESS_INTERVAL_US`) that drops excess callbacks before any processing work, and enabling `CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y` as defense-in-depth. Stability validated with a 4-min-per-node soak.
+- **Firmware: `filter_mac` / `node_id` clobber by WiFi driver init** (#232, #375, #385, #386, #390, #397) — `g_nvs_config` can be corrupted during `wifi_init_sta()` on some devices (confirmed on `80:b5:4e:c1:be:b8`), reverting `node_id` to the Kconfig default and producing garbage MAC-filter reads in the CSI callback (100–500 Hz). New `csi_collector_set_node_id()` API called from `app_main()` **before** `wifi_init_sta()` captures both fields into module-local statics (`s_node_id`, `s_filter_mac`, `s_filter_mac_set`). `csi_collector_init()` now runs a canary that distinguishes "early≠g_nvs_config" (corruption confirmed) from a no-op match. All CSI runtime paths use the defensive copies exclusively.
+- **Firmware: `edge_processing` sample rate mismatch** (#397) — `estimate_bpm_zero_crossing()` was called with a hard-coded `sample_rate = 20.0f`, but MGMT-only promiscuous delivers ~10 Hz. Breathing and heart-rate reports were 2× too high. Corrected to `10.0f` with an explicit comment tying it to the callback rate.
+- **`provision.py` esptool command form** (#391, #397) — ESP-IDF v5.4 bundles `esptool 4.10.0`, which only accepts `write_flash` (underscore). Standalone `pip install esptool` v5.x accepts both forms but prefers `write-flash`. #391 switched to `write-flash` which broke the documented ESP-IDF Python venv flow; #397 reverts to `write_flash` (works with both esptool 4.x and 5.x) with an inline comment warning future maintainers not to "re-fix" it.
+- **`provision.py` esptool v5 dry-run hint** (#391) — Stale `write_flash` (underscore) syntax in the dry-run manual-flash hint now uses `write-flash` (hyphenated) for esptool >= 5.x. The primary flash command was already correct.
 - **`provision.py` silent NVS wipe** (#391) — The script replaces the entire `csi_cfg` NVS namespace on every run, so partial invocations were silently erasing WiFi credentials and causing `Retrying WiFi connection (10/10)` in the field. Now refuses to run without `--ssid`, `--password`, and `--target-ip` unless `--force-partial` is passed. `--force-partial` prints a warning listing which keys will be wiped.
 - **Firmware: defensive `node_id` capture** (#232, #375, #385, #386, #390) — Users on multi-node deployments reported `node_id` reverting to the Kconfig default (`1`) in UDP frames and in the `csi_collector` init log, despite NVS loading the correct value. The root cause (memory corruption of `g_nvs_config`) has not been definitively isolated, but the UDP frame header is now tamper-proof: `csi_collector_init()` captures `g_nvs_config.node_id` into a module-local `s_node_id` once, and `csi_serialize_frame()` plus all other consumers (`edge_processing.c`, `wasm_runtime.c`, `display_ui.c`, `swarm_bridge_init`) read it via the new `csi_collector_get_node_id()` accessor. A canary logs `WARN` if `g_nvs_config.node_id` diverges from `s_node_id` at end-of-init, helping isolate the upstream corruption path. Validated on attached ESP32-S3 (COM8): NVS `node_id=2` propagates through boot log, capture log, init log, and byte[4] of every UDP frame.
 
