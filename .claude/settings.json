@@ -206,10 +206,7 @@
       "Bash(npx @anthropics/agentic-qe:*)",
       "mcp__agentic-qe__*"
     ],
-    "deny": [
-      "Read(./.env)",
-      "Read(./.env.*)"
-    ]
+    "deny": []
   },
   "attribution": {
     "commit": "Co-Authored-By: claude-flow <ruv@ruv.net>",

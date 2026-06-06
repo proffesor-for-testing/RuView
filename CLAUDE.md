@@ -8,21 +8,20 @@ Dual codebase: Python v1 (`v1/`) and Rust port (`v2/`).
 | Crate | Description |
 |-------|-------------|
 | `wifi-densepose-core` | Core types, traits, error types, CSI frame primitives |
-| `wifi-densepose-signal` | SOTA signal processing + RuvSense multistatic sensing (14 modules) |
+| `wifi-densepose-signal` | SOTA signal processing + RuvSense multistatic sensing (16 modules) |
 | `wifi-densepose-nn` | Neural network inference (ONNX, PyTorch, Candle backends) |
 | `wifi-densepose-train` | Training pipeline with ruvector integration + ruview_metrics |
 | `wifi-densepose-mat` | Mass Casualty Assessment Tool — disaster survivor detection |
 | `wifi-densepose-hardware` | ESP32 aggregator, TDM protocol, channel hopping firmware |
 | `wifi-densepose-ruvector` | RuVector v2.0.4 integration + cross-viewpoint fusion (5 modules) |
-| `wifi-densepose-api` | REST API (Axum) |
-| `wifi-densepose-db` | Database layer (Postgres, SQLite, Redis) |
-| `wifi-densepose-config` | Configuration management |
 | `wifi-densepose-wasm` | WebAssembly bindings for browser deployment |
 | `wifi-densepose-cli` | CLI tool (`wifi-densepose` binary) |
 | `wifi-densepose-sensing-server` | Lightweight Axum server for WiFi sensing UI |
 | `wifi-densepose-wifiscan` | Multi-BSSID WiFi scanning (ADR-022) |
 | `wifi-densepose-vitals` | ESP32 CSI-grade vital sign extraction (ADR-021) |
 | `nvsim` | Deterministic NV-diamond magnetometer pipeline simulator (ADR-089) — standalone leaf, WASM-ready |
+| `vendor/rvcsi` (submodule) | **rvCSI** — edge RF sensing runtime (ADR-095/096): 9 crates (`rvcsi-core`/`-dsp`/`-events`/`-adapter-file`/`-adapter-nexmon`/`-ruvector`/`-runtime`/`-node`/`-cli`). Lives in its own repo ([github.com/ruvnet/rvcsi](https://github.com/ruvnet/rvcsi)), vendored here under `vendor/rvcsi`, published to crates.io as `rvcsi-* 0.3.x` and to npm as `@ruv/rvcsi`. Not a `v2/` workspace member — depend on the published crates (or the submodule's `crates/rvcsi-*` paths). Normalized `CsiFrame`/`CsiWindow`/`CsiEvent` schema, validate-before-FFI, reusable DSP, typed confidence-scored events, the napi-c Nexmon shim (real nexmon_csi `.pcap` from a Raspberry Pi 5 / 4 / 3B+ — BCM43455c0), the napi-rs SDK, the `rvcsi` CLI, a Claude Code plugin. |
+| `ruview-swarm` | Drone swarm control system (ADR-148) — hierarchical-mesh topology, Raft consensus, MARL, CSI sensing payload, MAVLink/PX4 compat, Ruflo AI-agent integration |
 
 ### RuvSense Modules (`signal/src/ruvsense/`)
 | Module | Purpose |
@@ -40,6 +39,8 @@ Dual codebase: Python v1 (`v1/`) and Rust port (`v2/`).
 | `cross_room.rs` | Environment fingerprinting, transition graph |
 | `gesture.rs` | DTW template matching gesture classifier |
 | `adversarial.rs` | Physically impossible signal detection, multi-link consistency |
+| `cir.rs` | ADR-134 CSI→CIR via ISTA L1 sparse recovery (NeumannSolver warm-start) |
+| `calibration.rs` | ADR-135 empty-room baseline (Welford amplitude + von Mises phase, drift trigger) |
 
 ### Cross-Viewpoint Fusion (`ruvector/src/viewpoint/`)
 | Module | Purpose |
@@ -70,14 +71,15 @@ All 5 ruvector crates integrated in workspace:
 - ADR-030: RuvSense persistent field model (Proposed)
 - ADR-031: RuView sensing-first RF mode (Proposed)
 - ADR-032: Multistatic mesh security hardening (Proposed)
+- ADR-148: Drone swarm control system / `ruview-swarm` (In Progress)
 
 ### Supported Hardware
 
 | Device | Port | Chip | Role | Cost |
 |--------|------|------|------|------|
-| ESP32-S3 (8MB flash) | COM7 | Xtensa dual-core | WiFi CSI sensing node | ~$9 |
+| ESP32-S3 (8MB flash) | COM9 (ruvzen, was COM7) | Xtensa dual-core | WiFi CSI sensing node | ~$9 |
 | ESP32-S3 SuperMini (4MB) | — | Xtensa dual-core | WiFi CSI (compact) | ~$6 |
-| ESP32-C6 + Seeed MR60BHA2 | COM4 | RISC-V + 60 GHz FMCW | mmWave HR/BR/presence | ~$15 |
+| ESP32-C6 + Seeed MR60BHA2 | COM12 (ruvzen, was COM4) | RISC-V + 60 GHz FMCW | mmWave HR/BR/presence + WiFi CSI | ~$15 |
 | HLK-LD2410 | — | 24 GHz FMCW | Presence + distance | ~$3 |
 
 **Not supported:** ESP32 (original), ESP32-C3 — single-core, can't run CSI DSP pipeline.
@@ -134,17 +136,14 @@ Crates must be published in dependency order:
 2. `wifi-densepose-vitals` (no internal deps)
 3. `wifi-densepose-wifiscan` (no internal deps)
 4. `wifi-densepose-hardware` (no internal deps)
-5. `wifi-densepose-config` (no internal deps)
-6. `wifi-densepose-db` (no internal deps)
-7. `wifi-densepose-signal` (depends on core)
-8. `wifi-densepose-nn` (no internal deps, workspace only)
-9. `wifi-densepose-ruvector` (no internal deps, workspace only)
-10. `wifi-densepose-train` (depends on signal, nn)
-11. `wifi-densepose-mat` (depends on core, signal, nn)
-12. `wifi-densepose-api` (no internal deps)
-13. `wifi-densepose-wasm` (depends on mat)
-14. `wifi-densepose-sensing-server` (depends on wifiscan)
-15. `wifi-densepose-cli` (depends on mat)
+5. `wifi-densepose-signal` (depends on core)
+6. `wifi-densepose-nn` (no internal deps, workspace only)
+7. `wifi-densepose-ruvector` (no internal deps, workspace only)
+8. `wifi-densepose-train` (depends on signal, nn)
+9. `wifi-densepose-mat` (depends on core, signal, nn)
+10. `wifi-densepose-wasm` (depends on mat)
+11. `wifi-densepose-sensing-server` (depends on wifiscan)
+12. `wifi-densepose-cli` (depends on mat)
 
 ### Validation & Witness Verification (ADR-028)
 

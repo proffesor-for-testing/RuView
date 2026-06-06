@@ -9,9 +9,7 @@
 //! The classifier produces a single confidence score and a recommended
 //! triage status based on the combined signals.
 
-use crate::domain::{
-    BreathingType, MovementType, TriageStatus, VitalSignsReading,
-};
+use crate::domain::{BreathingType, MovementType, TriageStatus, VitalSignsReading};
 
 /// Configuration for the ensemble classifier
 #[derive(Debug, Clone)]
@@ -101,8 +99,9 @@ impl EnsembleClassifier {
         };
 
         // Weighted ensemble confidence
-        let total_weight =
-            self.config.breathing_weight + self.config.heartbeat_weight + self.config.movement_weight;
+        let total_weight = self.config.breathing_weight
+            + self.config.heartbeat_weight
+            + self.config.movement_weight;
 
         let ensemble_confidence = if total_weight > 0.0 {
             (breathing_conf * self.config.breathing_weight
@@ -147,11 +146,7 @@ impl EnsembleClassifier {
     /// as Immediate regardless of confidence level, because in disaster response
     /// a false negative (missing a survivor in distress) is far more costly
     /// than a false positive.
-    fn determine_triage(
-        &self,
-        reading: &VitalSignsReading,
-        confidence: f64,
-    ) -> TriageStatus {
+    fn determine_triage(&self, reading: &VitalSignsReading, confidence: f64) -> TriageStatus {
         // CRITICAL PATTERNS: always classify regardless of confidence.
         // In disaster response, any sign of distress must be escalated.
         if let Some(ref breathing) = reading.breathing {
@@ -163,7 +158,7 @@ impl EnsembleClassifier {
             }
 
             let rate = breathing.rate_bpm;
-            if rate < 10.0 || rate > 30.0 {
+            if !(10.0..=30.0).contains(&rate) {
                 return TriageStatus::Immediate;
             }
         }
@@ -177,6 +172,14 @@ impl EnsembleClassifier {
         let has_movement = reading.movement.movement_type != MovementType::None;
 
         if !has_breathing && !has_movement {
+            // SAFETY: a detectable heartbeat means the survivor is ALIVE. No
+            // sensed breathing/movement *with* a pulse is respiratory arrest —
+            // the most time-critical savable state (Immediate), never Deceased.
+            // Only the total absence of breathing, movement AND heartbeat is
+            // reported Deceased.
+            if reading.heartbeat.is_some() {
+                return TriageStatus::Immediate;
+            }
             return TriageStatus::Deceased;
         }
 
@@ -188,7 +191,7 @@ impl EnsembleClassifier {
         if let Some(ref breathing) = reading.breathing {
             let rate = breathing.rate_bpm;
 
-            if rate < 12.0 || rate > 24.0 {
+            if !(12.0..=24.0).contains(&rate) {
                 if has_movement {
                     return TriageStatus::Delayed;
                 }
@@ -215,8 +218,7 @@ impl EnsembleClassifier {
 mod tests {
     use super::*;
     use crate::domain::{
-        BreathingPattern, HeartbeatSignature, MovementProfile,
-        SignalStrength, ConfidenceScore,
+        BreathingPattern, ConfidenceScore, HeartbeatSignature, MovementProfile, SignalStrength,
     };
 
     fn make_reading(
@@ -266,11 +268,7 @@ mod tests {
     #[test]
     fn test_agonal_breathing_is_immediate() {
         let classifier = EnsembleClassifier::new(EnsembleConfig::default());
-        let reading = make_reading(
-            Some((8.0, BreathingType::Agonal)),
-            None,
-            MovementType::None,
-        );
+        let reading = make_reading(Some((8.0, BreathingType::Agonal)), None, MovementType::None);
 
         let result = classifier.classify(&reading);
         assert_eq!(result.recommended_triage, TriageStatus::Immediate);
@@ -295,12 +293,35 @@ mod tests {
         let mut reading = VitalSignsReading::new(None, None, mv);
         reading.confidence = ConfidenceScore::new(0.5);
 
-        let mut config = EnsembleConfig::default();
-        config.min_ensemble_confidence = 0.0;
+        let config = EnsembleConfig {
+            min_ensemble_confidence: 0.0,
+            ..EnsembleConfig::default()
+        };
         let classifier = EnsembleClassifier::new(config);
 
         let result = classifier.classify(&reading);
         assert_eq!(result.recommended_triage, TriageStatus::Deceased);
+    }
+
+    /// SAFETY regression: heartbeat present but no sensed breathing/movement is
+    /// respiratory arrest — Immediate, never Deceased. Only the *total* absence
+    /// of breathing, movement AND heartbeat (the test above) is Deceased.
+    #[test]
+    fn test_heartbeat_with_no_breathing_or_movement_is_immediate() {
+        // breathing: None, heartbeat: Some(72 bpm), movement: None
+        let reading = make_reading(None, Some(72.0), MovementType::None);
+
+        let classifier = EnsembleClassifier::new(EnsembleConfig {
+            min_ensemble_confidence: 0.0,
+            ..EnsembleConfig::default()
+        });
+
+        let result = classifier.classify(&reading);
+        assert_eq!(
+            result.recommended_triage,
+            TriageStatus::Immediate,
+            "a survivor with a pulse must never be triaged Deceased"
+        );
     }
 
     #[test]

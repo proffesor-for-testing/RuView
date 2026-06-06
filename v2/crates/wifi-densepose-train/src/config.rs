@@ -15,6 +15,15 @@
 //!
 //! assert_eq!(cfg.num_subcarriers, 56);
 //! assert_eq!(cfg.num_keypoints, 17);
+//!
+//! // Adapt for a non-MM-Fi source — e.g. an ESP32 HT40 capture (~192 raw
+//! // subcarriers) or the ADR-078 multi-band mesh (168). The model still sees
+//! // `num_subcarriers`; the loader resamples the native count down to it.
+//! let ht40 = TrainingConfig::ht40_192();
+//! assert_eq!(ht40.native_subcarriers, 192);
+//! assert!(ht40.needs_subcarrier_interp());
+//! let mesh = TrainingConfig::for_subcarriers(168, 56);
+//! assert_eq!(mesh.native_subcarriers, 168);
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -36,16 +45,26 @@ pub struct TrainingConfig {
     // -----------------------------------------------------------------------
     // Data / Signal
     // -----------------------------------------------------------------------
-    /// Number of subcarriers after interpolation (system target).
+    /// Number of subcarriers after interpolation (the *model's* input width).
     ///
     /// The model always sees this many subcarriers regardless of the raw
-    /// hardware output. Default: **56**.
+    /// hardware output; [`crate::subcarrier::interpolate_subcarriers`] resamples
+    /// `native_subcarriers` → `num_subcarriers` when they differ. Default: **56**.
     pub num_subcarriers: usize,
 
-    /// Number of subcarriers in the raw dataset before interpolation.
+    /// Number of subcarriers in the *raw* dataset, before interpolation.
     ///
-    /// MM-Fi provides 114 subcarriers; set this to 56 when the dataset
-    /// already matches the target count. Default: **114**.
+    /// Common sources: MM-Fi = 114, ESP32 HT20 = 56, ESP32 HT40 ≈ 192 (or 114),
+    /// multi-band mesh = 168 (ADR-078). When it equals [`Self::num_subcarriers`]
+    /// no interpolation happens ([`Self::needs_subcarrier_interp`]). For the
+    /// non-MM-Fi shapes prefer the preset constructors
+    /// ([`Self::for_subcarriers`], [`Self::ht40_192`], [`Self::multiband_168`])
+    /// over overriding both fields by hand. Default: **114**.
+    ///
+    /// **Multi-NIC note:** a 2–3-node CSI mesh currently maps onto the existing
+    /// `[T, n_tx, n_rx, n_sc]` layout by treating the nodes' receive chains as
+    /// extra `n_rx` (i.e. `num_antennas_rx = nodes × per_node_rx`); a dedicated
+    /// node dimension is a separate dataset-loader change.
     pub native_subcarriers: usize,
 
     /// Number of transmit antennas. Default: **3**.
@@ -238,6 +257,43 @@ impl TrainingConfig {
         Ok(())
     }
 
+    /// Build a config for a dataset whose raw CSI has `native` subcarriers,
+    /// resampling to `target` (the model's input width) before training.
+    ///
+    /// All other fields take their [`Default`] values. Prefer this over
+    /// overriding `native_subcarriers` / `num_subcarriers` directly so the
+    /// relationship between the dataset's shape and the model's is explicit.
+    #[must_use]
+    pub fn for_subcarriers(native: usize, target: usize) -> Self {
+        Self {
+            native_subcarriers: native,
+            num_subcarriers: target,
+            ..Self::default()
+        }
+    }
+
+    /// Preset for the MM-Fi dataset (114 raw subcarriers → 56). Identical to
+    /// [`Self::default()`]; provided as a named counterpart to the other
+    /// presets.
+    #[must_use]
+    pub fn mmfi() -> Self {
+        Self::default()
+    }
+
+    /// Preset for ESP32 HT40 captures (≈192 raw subcarriers → 56). Use
+    /// [`Self::for_subcarriers`] if your capture reports a different native
+    /// count (some HT40 firmwares yield 114).
+    #[must_use]
+    pub fn ht40_192() -> Self {
+        Self::for_subcarriers(192, 56)
+    }
+
+    /// Preset for the ADR-078 multi-band mesh (168 raw subcarriers → 56).
+    #[must_use]
+    pub fn multiband_168() -> Self {
+        Self::for_subcarriers(168, 56)
+    }
+
     /// Returns `true` when the native dataset subcarrier count differs from the
     /// model's target count and interpolation is therefore required.
     pub fn needs_subcarrier_interp(&self) -> bool {
@@ -310,16 +366,10 @@ impl TrainingConfig {
             return Err(ConfigError::invalid_value("batch_size", "must be > 0"));
         }
         if self.learning_rate <= 0.0 {
-            return Err(ConfigError::invalid_value(
-                "learning_rate",
-                "must be > 0.0",
-            ));
+            return Err(ConfigError::invalid_value("learning_rate", "must be > 0.0"));
         }
         if self.weight_decay < 0.0 {
-            return Err(ConfigError::invalid_value(
-                "weight_decay",
-                "must be >= 0.0",
-            ));
+            return Err(ConfigError::invalid_value("weight_decay", "must be >= 0.0"));
         }
         if self.grad_clip_norm <= 0.0 {
             return Err(ConfigError::invalid_value(
@@ -418,7 +468,9 @@ mod tests {
         let path = tmp.path().join("config.json");
 
         let original = TrainingConfig::default();
-        original.to_json(&path).expect("serialization should succeed");
+        original
+            .to_json(&path)
+            .expect("serialization should succeed");
 
         let loaded = TrainingConfig::from_json(&path).expect("deserialization should succeed");
         assert_eq!(loaded.num_subcarriers, original.num_subcarriers);
@@ -429,57 +481,78 @@ mod tests {
 
     #[test]
     fn zero_subcarriers_is_invalid() {
-        let mut cfg = TrainingConfig::default();
-        cfg.num_subcarriers = 0;
+        let cfg = TrainingConfig {
+            num_subcarriers: 0,
+            ..TrainingConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn negative_learning_rate_is_invalid() {
-        let mut cfg = TrainingConfig::default();
-        cfg.learning_rate = -0.001;
+        let cfg = TrainingConfig {
+            learning_rate: -0.001,
+            ..TrainingConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn warmup_equal_to_epochs_is_invalid() {
-        let mut cfg = TrainingConfig::default();
-        cfg.warmup_epochs = cfg.num_epochs;
+        let default = TrainingConfig::default();
+        let cfg = TrainingConfig {
+            warmup_epochs: default.num_epochs,
+            ..default
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn non_increasing_milestones_are_invalid() {
-        let mut cfg = TrainingConfig::default();
-        cfg.lr_milestones = vec![30, 20]; // wrong order
+        let cfg = TrainingConfig {
+            lr_milestones: vec![30, 20],
+            ..TrainingConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn milestone_beyond_epochs_is_invalid() {
-        let mut cfg = TrainingConfig::default();
-        cfg.lr_milestones = vec![30, cfg.num_epochs + 1];
+        let default = TrainingConfig::default();
+        let beyond = default.num_epochs + 1;
+        let cfg = TrainingConfig {
+            lr_milestones: vec![30, beyond],
+            ..default
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn all_zero_loss_weights_are_invalid() {
-        let mut cfg = TrainingConfig::default();
-        cfg.lambda_kp = 0.0;
-        cfg.lambda_dp = 0.0;
-        cfg.lambda_tr = 0.0;
+        let cfg = TrainingConfig {
+            lambda_kp: 0.0,
+            lambda_dp: 0.0,
+            lambda_tr: 0.0,
+            ..TrainingConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn needs_subcarrier_interp_when_counts_differ() {
-        let mut cfg = TrainingConfig::default();
-        cfg.num_subcarriers = 56;
-        cfg.native_subcarriers = 114;
+        let cfg = TrainingConfig {
+            num_subcarriers: 56,
+            native_subcarriers: 114,
+            ..TrainingConfig::default()
+        };
         assert!(cfg.needs_subcarrier_interp());
 
-        cfg.native_subcarriers = 56;
-        assert!(!cfg.needs_subcarrier_interp());
+        let cfg2 = TrainingConfig {
+            num_subcarriers: 56,
+            native_subcarriers: 56,
+            ..TrainingConfig::default()
+        };
+        assert!(!cfg2.needs_subcarrier_interp());
     }
 
     #[test]

@@ -34,12 +34,13 @@
 //! }
 //! ```
 
-mod csi_frame;
-mod error;
-mod esp32_parser;
 pub mod aggregator;
 mod bridge;
+mod csi_frame;
+mod error;
 pub mod esp32;
+mod esp32_parser;
+pub mod sync_packet;
 
 // ADR-081: Rust mirror of the firmware radio abstraction layer (L1) and
 // mesh sensing plane (L3). Lets host tests, simulators, and future
@@ -47,14 +48,20 @@ pub mod esp32;
 // touching any downstream signal/ruvector/train/mat crate.
 pub mod radio_ops;
 
-pub use csi_frame::{CsiFrame, CsiMetadata, SubcarrierData, Bandwidth, AntennaConfig};
-pub use error::ParseError;
-pub use esp32_parser::Esp32CsiParser;
 pub use bridge::CsiData;
+pub use csi_frame::{AntennaConfig, Bandwidth, CsiFrame, CsiMetadata, SubcarrierData};
+pub use error::ParseError;
+pub use esp32_parser::{
+    ruview_sibling_packet_name, Esp32CsiParser, ESP32_CSI_MAGIC, RUVIEW_COMPRESSED_CSI_MAGIC,
+    RUVIEW_FEATURE_MAGIC, RUVIEW_FEATURE_STATE_MAGIC, RUVIEW_FUSED_VITALS_MAGIC,
+    RUVIEW_TEMPORAL_MAGIC, RUVIEW_VITALS_MAGIC,
+};
+pub use sync_packet::{
+    SyncPacket, SyncPacketFlags, SYNC_PACKET_MAGIC, SYNC_PACKET_SIZE, SYNC_PACKET_PROTO_VER,
+};
 pub use radio_ops::{
-    RadioOps, RadioMode, CaptureProfile, RadioHealth, RadioError, MockRadio,
-    MeshRole, MeshMsgType, AuthClass, MeshHeader, NodeStatus, AnomalyAlert,
-    MeshError, MESH_MAGIC, MESH_VERSION, MESH_HEADER_SIZE, MESH_MAX_PAYLOAD,
-    crc32_ieee, decode_mesh, decode_node_status, decode_anomaly_alert,
-    encode_health,
+    crc32_ieee, decode_anomaly_alert, decode_mesh, decode_node_status, encode_health, AnomalyAlert,
+    AuthClass, CaptureProfile, MeshError, MeshHeader, MeshMsgType, MeshRole, MockRadio, NodeStatus,
+    RadioError, RadioHealth, RadioMode, RadioOps, MESH_HEADER_SIZE, MESH_MAGIC, MESH_MAX_PAYLOAD,
+    MESH_VERSION,
 };

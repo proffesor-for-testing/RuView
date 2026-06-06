@@ -1,11 +1,11 @@
-# ESP32-S3 CSI Node Firmware
+# ESP32 CSI Node Firmware
 
 **Turn a $7 microcontroller into a privacy-first human sensing node.**
 
-This firmware captures WiFi Channel State Information (CSI) from an ESP32-S3 and transforms it into real-time presence detection, vital sign monitoring, and programmable sensing -- all without cameras or wearables. Part of the [WiFi-DensePose](../../README.md) project.
+This firmware captures WiFi Channel State Information (CSI) from an ESP32-S3 (production) or ESP32-C6 (research target — Wi-Fi 6 / 802.15.4 / TWT / LP-core hibernation, see [ADR-110](../../docs/adr/ADR-110-esp32-c6-firmware-extension.md)) and transforms it into real-time presence detection, vital sign monitoring, and programmable sensing -- all without cameras or wearables. Part of the [WiFi-DensePose](../../README.md) project.
 
 [![ESP-IDF v5.2](https://img.shields.io/badge/ESP--IDF-v5.2-blue.svg)](https://docs.espressif.com/projects/esp-idf/en/v5.2/)
-[![Target: ESP32-S3](https://img.shields.io/badge/target-ESP32--S3-purple.svg)](https://www.espressif.com/en/products/socs/esp32-s3)
+[![Target: ESP32-S3 / ESP32-C6](https://img.shields.io/badge/target-ESP32--S3%20%7C%20ESP32--C6-purple.svg)](https://www.espressif.com/en/products/socs/esp32-s3)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green.svg)](../../LICENSE)
 [![Binary: ~943 KB](https://img.shields.io/badge/binary-~943%20KB-orange.svg)](#memory-budget)
 [![CI: Docker Build](https://img.shields.io/badge/CI-Docker%20Build-brightgreen.svg)](../../.github/workflows/firmware-ci.yml)
@@ -15,7 +15,7 @@ This firmware captures WiFi Channel State Information (CSI) from an ESP32-S3 and
 > | **CSI streaming** | Per-subcarrier I/Q capture over UDP | ~20 Hz, ADR-018 binary format |
 > | **Breathing detection** | Bandpass 0.1-0.5 Hz, zero-crossing BPM | 6-30 BPM |
 > | **Heart rate** | Bandpass 0.8-2.0 Hz, zero-crossing BPM | 40-120 BPM |
-> | **Presence sensing** | Phase variance + adaptive calibration | < 1 ms latency |
+> | **Presence indicator** (heuristic) | Phase variance + adaptive threshold (60 s ambient learning) | < 1 ms latency, false-positives under strong RF interference — see [Tier 2 caveats](#what-this-firmware-does-not-do-tier-2-caveats) |
 > | **Fall detection** | Phase acceleration threshold | Configurable sensitivity |
 > | **Programmable sensing** | WASM modules loaded over HTTP | Hot-swap, no reflash |
 
@@ -24,6 +24,23 @@ This firmware captures WiFi Channel State Information (CSI) from an ESP32-S3 and
 ## Quick Start
 
 For users who want to get running fast. Detailed explanations follow in later sections.
+
+### 0. Pre-built binaries (v0.6.5 — skip the build step)
+
+Pre-built binaries are in `firmware/esp32-csi-node/release_bins/` (version: see `release_bins/version.txt`).
+Flash them directly:
+
+```bash
+python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
+  write_flash --flash_mode dio --flash_size 8MB \
+  0x0     firmware/esp32-csi-node/release_bins/bootloader.bin \
+  0x8000  firmware/esp32-csi-node/release_bins/partition-table.bin \
+  0xf000  firmware/esp32-csi-node/release_bins/ota_data_initial.bin \
+  0x20000 firmware/esp32-csi-node/release_bins/esp32-csi-node.bin
+```
+
+For 4 MB boards use `release_bins/esp32-csi-node-4mb.bin` and `release_bins/partition-table-4mb.bin`
+with `--flash_size 4MB`.
 
 ### 1. Build (Docker -- the only reliable method)
 
@@ -37,18 +54,22 @@ MSYS_NO_PATHCONV=1 docker run --rm \
 
 ### 2. Flash
 
+Offsets must match `partitions_display.csv` (8 MB) or `partitions_4mb.csv` (4 MB):
+`bootloader=0x0`, `partition-table=0x8000`, `otadata=0xf000`, `app (ota_0)=0x20000`.
+
 ```bash
 python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
   write_flash --flash_mode dio --flash_size 8MB \
-  0x0 firmware/esp32-csi-node/build/bootloader/bootloader.bin \
-  0x8000 firmware/esp32-csi-node/build/partition_table/partition-table.bin \
-  0x10000 firmware/esp32-csi-node/build/esp32-csi-node.bin
+  0x0     firmware/esp32-csi-node/build/bootloader/bootloader.bin \
+  0x8000  firmware/esp32-csi-node/build/partition_table/partition-table.bin \
+  0xf000  firmware/esp32-csi-node/build/ota_data_initial.bin \
+  0x20000 firmware/esp32-csi-node/build/esp32-csi-node.bin
 ```
 
 ### 3. Provision WiFi credentials (no reflash needed)
 
 ```bash
-python scripts/provision.py --port COM7 \
+python firmware/esp32-csi-node/provision.py --port COM7 \
   --ssid "YourSSID" --password "YourPass" --target-ip 192.168.1.20
 ```
 
@@ -129,10 +150,31 @@ Adds real-time health and safety monitoring.
 
 - **Breathing rate** -- biquad IIR bandpass 0.1-0.5 Hz, zero-crossing BPM (6-30 BPM)
 - **Heart rate** -- biquad IIR bandpass 0.8-2.0 Hz, zero-crossing BPM (40-120 BPM)
-- **Presence detection** -- adaptive threshold calibration (60 s ambient learning)
+- **Presence indicator** -- phase variance vs an adaptively-calibrated threshold (60 s ambient learning at boot). Heuristic, not a learned classifier — strong RF interferers (fans, microwaves, transmit-power swings) can push variance above threshold without anyone in the room. See "What this firmware does NOT do" below.
 - **Fall detection** -- phase acceleration exceeds configurable threshold
-- **Multi-person estimation** -- subcarrier group clustering (up to 4 persons)
+- **Multi-person slot count** -- partitions the top-K subcarriers into `top_k / 2` groups (clamped to `[1, EDGE_MAX_PERSONS]`), computes per-group filtered breathing/heart-rate estimates, and reports the slot count as `pkt.n_persons`. This is a **slot-capacity heuristic**, not a learned counter — the reported count tracks subcarrier diversity, not actual occupancy. See [`edge_processing.c:481-548`](main/edge_processing.c#L481-L548).
 - **Vitals packet** -- 32-byte UDP packet at 1 Hz (magic `0xC5110002`)
+
+### What this firmware does NOT do (Tier 2 caveats)
+
+- It does **not** run a trained neural model. The "person count" is an
+  arithmetic slot-capacity heuristic over the top-K subcarrier groups
+  (`firmware/esp32-csi-node/main/edge_processing.c:481`). It tracks
+  subcarrier diversity, not actual occupancy.
+- It does **not** run pose estimation. Pose-related features in the host
+  UI come from the Rust `wifi-densepose-sensing-server` running a separate
+  pipeline. When no `.rvf` model file is loaded via `--model`, the server
+  drives the on-screen skeleton from signal-based heuristics (amplitude
+  variance, motion-band power), not from learned keypoint inference. The
+  repository does not ship pre-trained weights — see issues
+  [#509](../../issues/509) and [#506](../../issues/506) for context, and
+  [ADR-079](../../docs/adr/ADR-079-camera-supervised-pose-finetune.md) for
+  the planned training path (phases P7-P9 are `Pending`).
+- The presence indicator is a calibrated variance threshold and **will
+  false-positive** under strong RF interference from non-human sources
+  (fans near the antenna, microwave duty cycles, neighbouring AP power
+  swings) without re-running the 60-second ambient calibration. If you
+  see ghost detections, re-calibrate by power-cycling in an empty room.
 
 ### Tier 3 -- WASM Programmable Sensing (Alpha)
 
@@ -254,9 +296,10 @@ Find your serial port: `COM7` on Windows, `/dev/ttyUSB0` on Linux, `/dev/cu.SLAB
 ```bash
 python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
   write_flash --flash_mode dio --flash_size 8MB \
-  0x0 firmware/esp32-csi-node/build/bootloader/bootloader.bin \
-  0x8000 firmware/esp32-csi-node/build/partition_table/partition-table.bin \
-  0x10000 firmware/esp32-csi-node/build/esp32-csi-node.bin
+  0x0     firmware/esp32-csi-node/build/bootloader/bootloader.bin \
+  0x8000  firmware/esp32-csi-node/build/partition_table/partition-table.bin \
+  0xf000  firmware/esp32-csi-node/build/ota_data_initial.bin \
+  0x20000 firmware/esp32-csi-node/build/esp32-csi-node.bin
 ```
 
 ### Serial Monitor
@@ -268,8 +311,9 @@ python -m serial.tools.miniterm COM7 115200
 Expected output after boot:
 
 ```
-I (321) main: ESP32-S3 CSI Node (ADR-018) -- Node ID: 1
-I (345) main: WiFi STA initialized, connecting to SSID: wifi-densepose
+I (396) csi_collector: Early capture node_id=1 (before WiFi init, #232/#390)
+I (406) main: ESP32-S3 CSI Node (ADR-018) -- v0.6.5 -- Node ID: 1
+I (566) main: WiFi STA initialized, connecting to SSID: wifi-densepose
 I (1023) main: Connected to WiFi
 I (1025) main: CSI streaming active -> 192.168.1.100:5005 (edge_tier=2, OTA=ready, WASM=ready)
 ```
@@ -285,7 +329,7 @@ All settings can be changed at runtime via Non-Volatile Storage (NVS) without re
 The easiest way to write NVS settings:
 
 ```bash
-python scripts/provision.py --port COM7 \
+python firmware/esp32-csi-node/provision.py --port COM7 \
   --ssid "MyWiFi" \
   --password "MyPassword" \
   --target-ip 192.168.1.20

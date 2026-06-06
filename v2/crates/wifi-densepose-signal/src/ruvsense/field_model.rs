@@ -276,6 +276,13 @@ pub struct FieldNormalMode {
     pub geometry_hash: u64,
     /// Baseline eigenvalue count above Marcenko-Pastur threshold (empty-room).
     pub baseline_eigenvalue_count: usize,
+    /// Baseline noise variance estimate (median of bottom-half positive
+    /// eigenvalues from the calibration covariance). Persisted so that
+    /// `estimate_occupancy` can anchor its Marcenko-Pastur threshold to the
+    /// calibration noise floor instead of letting it drift with the
+    /// per-window sample size. Defaults to 0.0 in the diagonal-fallback path.
+    /// Issue #942.
+    pub baseline_noise_var: f64,
 }
 
 /// Body perturbation extracted from a CSI observation.
@@ -366,8 +373,7 @@ fn diagonal_fallback(
     let mut environmental_modes = Vec::with_capacity(n_modes);
     let mut mode_energies = Vec::with_capacity(n_modes);
 
-    for k in 0..n_modes.min(n_sc) {
-        let idx = indices[k];
+    for &idx in indices.iter().take(n_modes.min(n_sc)) {
         let mut mode = vec![0.0_f64; n_sc];
         mode[idx] = 1.0;
         mode_energies.push(avg_variance[idx]);
@@ -376,7 +382,11 @@ fn diagonal_fallback(
 
     // For diagonal fallback, estimate baseline eigenvalue count from variance
     let total_var: f64 = avg_variance.iter().sum();
-    let mean_var = if n_sc > 0 { total_var / n_sc as f64 } else { 0.0 };
+    let mean_var = if n_sc > 0 {
+        total_var / n_sc as f64
+    } else {
+        0.0
+    };
     let baseline_count = avg_variance.iter().filter(|&&v| v > mean_var * 2.0).count();
 
     (mode_energies, environmental_modes, baseline_count)
@@ -452,8 +462,10 @@ impl FieldModel {
         // mean subtraction is deferred to finalize_calibration to avoid bias).
         // We average across links so covariance_count tracks frames, not links.
         let n = self.config.n_subcarriers;
-        let cov = self.covariance_sum.get_or_insert_with(|| Array2::zeros((n, n)));
-        let n_links = observations.len();
+        let cov = self
+            .covariance_sum
+            .get_or_insert_with(|| Array2::zeros((n, n)));
+        let _n_links = observations.len();
         for obs in observations {
             if obs.len() >= n {
                 // Rank-1 update: cov += obs * obs^T (raw, un-centered)
@@ -499,7 +511,11 @@ impl FieldModel {
         let baseline: Vec<Vec<f64>> = self.link_stats.iter().map(|ls| ls.mean_vector()).collect();
 
         // --- True eigenvalue decomposition (with diagonal fallback) ---
-        let (mode_energies, environmental_modes, baseline_eig_count) =
+        // Returns: (energies, modes, baseline_count, baseline_noise_var).
+        // The noise_var slot is 0.0 in the diagonal-fallback paths; the
+        // estimation hot path treats 0.0 as "no anchored noise floor" and
+        // falls back to per-window noise_var, preserving pre-#942 behavior.
+        let (mode_energies, environmental_modes, baseline_eig_count, baseline_noise_var) =
             if let Some(ref cov_sum) = self.covariance_sum {
                 if self.covariance_count > 1 {
                     // Compute sample covariance from raw outer products:
@@ -512,9 +528,13 @@ impl FieldModel {
                     let mut avg_mean = vec![0.0f64; n_sc];
                     for ls in &self.link_stats {
                         let m = ls.mean_vector();
-                        for i in 0..n_sc { avg_mean[i] += m[i]; }
+                        for (a, &mi) in avg_mean.iter_mut().zip(m.iter()) {
+                            *a += mi;
+                        }
                     }
-                    for i in 0..n_sc { avg_mean[i] /= n_links; }
+                    for a in avg_mean.iter_mut() {
+                        *a /= n_links;
+                    }
                     // cov = sum_xx / (N * n_links) - mean * mean^T, then Bessel correction
                     let total_obs = n_frames * n_links;
                     let mut covariance = cov_sum / total_obs;
@@ -557,9 +577,11 @@ impl FieldModel {
                             // eigenvalues in the bottom half. Excludes zeros from
                             // rank-deficient matrices (when p > n).
                             let noise_var = {
-                                let mut positive: Vec<f64> = eigenvalues
-                                    .iter().copied().filter(|&e| e > 1e-10).collect();
-                                positive.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                let mut positive: Vec<f64> =
+                                    eigenvalues.iter().copied().filter(|&e| e > 1e-10).collect();
+                                positive.sort_by(|a, b| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                });
                                 if positive.len() >= 4 {
                                     let half = positive.len() / 2;
                                     positive[..half].iter().sum::<f64>() / half as f64
@@ -570,29 +592,35 @@ impl FieldModel {
                                 }
                             };
                             // MP ratio: p/n where n = total observations (frames * links)
-                            let total_obs_mp = self.covariance_count as f64 * self.config.n_links as f64;
+                            let total_obs_mp =
+                                self.covariance_count as f64 * self.config.n_links as f64;
                             let ratio = n_sc as f64 / total_obs_mp;
                             let mp_threshold = noise_var * (1.0 + ratio.sqrt()).powi(2);
-                            let baseline_count = eigenvalues
-                                .iter()
-                                .filter(|&&ev| ev > mp_threshold)
-                                .count();
+                            let baseline_count =
+                                eigenvalues.iter().filter(|&&ev| ev > mp_threshold).count();
 
-                            (energies, modes, baseline_count)
+                            (energies, modes, baseline_count, noise_var)
                         }
                         Err(_) => {
                             // Fallback to diagonal approximation on SVD failure
-                            diagonal_fallback(&self.link_stats, n_sc, n_modes)
+                            let (e, m, b) =
+                                diagonal_fallback(&self.link_stats, n_sc, n_modes);
+                            (e, m, b, 0.0_f64)
                         }
                     }
                     // When eigenvalue feature is disabled, use diagonal fallback
                     #[cfg(not(feature = "eigenvalue"))]
-                    { diagonal_fallback(&self.link_stats, n_sc, n_modes) }
+                    {
+                        let (e, m, b) = diagonal_fallback(&self.link_stats, n_sc, n_modes);
+                        (e, m, b, 0.0_f64)
+                    }
                 } else {
-                    diagonal_fallback(&self.link_stats, n_sc, n_modes)
+                    let (e, m, b) = diagonal_fallback(&self.link_stats, n_sc, n_modes);
+                    (e, m, b, 0.0_f64)
                 }
             } else {
-                diagonal_fallback(&self.link_stats, n_sc, n_modes)
+                let (e, m, b) = diagonal_fallback(&self.link_stats, n_sc, n_modes);
+                (e, m, b, 0.0_f64)
             };
 
         // Compute variance explained using the same centered covariance as modes.
@@ -606,9 +634,13 @@ impl FieldModel {
                 let mut avg_mean = vec![0.0f64; n_sc];
                 for ls in &self.link_stats {
                     let m = ls.mean_vector();
-                    for i in 0..n_sc { avg_mean[i] += m[i]; }
+                    for (a, &mi) in avg_mean.iter_mut().zip(m.iter()) {
+                        *a += mi;
+                    }
                 }
-                for i in 0..n_sc { avg_mean[i] /= n_links_f; }
+                for a in avg_mean.iter_mut() {
+                    *a /= n_links_f;
+                }
                 let raw_trace: f64 = (0..n_sc).map(|i| cov_sum[[i, i]] / total_obs).sum();
                 let mean_sq: f64 = avg_mean.iter().map(|m| m * m).sum();
                 (raw_trace - mean_sq).max(0.0) * total_obs / (total_obs - 1.0)
@@ -632,6 +664,7 @@ impl FieldModel {
             calibrated_at_us: timestamp_us,
             geometry_hash,
             baseline_eigenvalue_count: baseline_eig_count,
+            baseline_noise_var,
         };
 
         self.modes = Some(field_mode);
@@ -778,11 +811,9 @@ impl FieldModel {
         // Marcenko-Pastur noise estimate: median of POSITIVE eigenvalues
         // in the bottom half. Excludes zeros from rank-deficient matrices
         // (common when n_subcarriers > n_frames, e.g. 56 subcarriers / 50 frames).
-        let noise_var = {
-            let mut positive: Vec<f64> = eigenvalues.iter()
-                .copied()
-                .filter(|&e| e > 1e-10)
-                .collect();
+        let local_noise_var = {
+            let mut positive: Vec<f64> =
+                eigenvalues.iter().copied().filter(|&e| e > 1e-10).collect();
             positive.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             if positive.len() >= 4 {
                 let half = positive.len() / 2;
@@ -793,6 +824,22 @@ impl FieldModel {
                 return Ok(0); // All zero eigenvalues — can't estimate
             }
         };
+
+        // Issue #942: anchor the noise floor to the calibration's noise_var
+        // when it's available. Per-window noise_var drifts with sample size —
+        // a short estimation window can produce a small local_noise_var that
+        // inflates `significant` and breaks the test_estimate_occupancy_noise_only
+        // invariant. The max of (calibration noise, local noise) keeps the
+        // threshold from collapsing on small windows while still letting the
+        // per-window noise dominate when it's the larger estimate. Falls back
+        // to local_noise_var when baseline_noise_var == 0 (diagonal-fallback
+        // calibration path, or pre-#942 stored modes).
+        let noise_var = if modes.baseline_noise_var > 0.0 {
+            local_noise_var.max(modes.baseline_noise_var)
+        } else {
+            local_noise_var
+        };
+
         let ratio = n as f64 / count as f64;
         let mp_threshold = noise_var * (1.0 + ratio.sqrt()).powi(2);
 
@@ -804,7 +851,10 @@ impl FieldModel {
 
     /// Stub when eigenvalue feature is disabled — always returns NotCalibrated.
     #[cfg(not(feature = "eigenvalue"))]
-    pub fn estimate_occupancy(&self, _recent_frames: &[Vec<f64>]) -> Result<usize, FieldModelError> {
+    pub fn estimate_occupancy(
+        &self,
+        _recent_frames: &[Vec<f64>],
+    ) -> Result<usize, FieldModelError> {
         Err(FieldModelError::NotCalibrated)
     }
 
@@ -1012,8 +1062,26 @@ mod tests {
         // Calibrate with drift on subcarriers 0 and 1 only
         for i in 0..10 {
             let obs = vec![
-                vec![1.0 + 0.5 * i as f64, 2.0 + 0.3 * i as f64, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-                vec![1.1 + 0.5 * i as f64, 2.1 + 0.3 * i as f64, 3.1, 4.1, 5.1, 6.1, 7.1, 8.1],
+                vec![
+                    1.0 + 0.5 * i as f64,
+                    2.0 + 0.3 * i as f64,
+                    3.0,
+                    4.0,
+                    5.0,
+                    6.0,
+                    7.0,
+                    8.0,
+                ],
+                vec![
+                    1.1 + 0.5 * i as f64,
+                    2.1 + 0.3 * i as f64,
+                    3.1,
+                    4.1,
+                    5.1,
+                    6.1,
+                    7.1,
+                    8.1,
+                ],
             ];
             model.feed_calibration(&obs).unwrap();
         }

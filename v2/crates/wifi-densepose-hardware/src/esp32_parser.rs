@@ -31,11 +31,49 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::Utc;
 use std::io::Cursor;
 
-use crate::csi_frame::{AntennaConfig, Bandwidth, CsiFrame, CsiMetadata, SubcarrierData};
+use crate::csi_frame::{
+    Adr018Flags, AntennaConfig, Bandwidth, CsiFrame, CsiMetadata, PpduType, SubcarrierData,
+};
 use crate::error::ParseError;
 
 /// ESP32 CSI binary frame magic number (ADR-018).
-const ESP32_CSI_MAGIC: u32 = 0xC5110001;
+pub const ESP32_CSI_MAGIC: u32 = 0xC5110001;
+
+// ── Sibling RuView wire packets ──────────────────────────────────────────────
+// The ESP32 firmware multiplexes several packet types onto the same UDP port
+// as ADR-018 raw CSI frames. A CSI-only consumer will therefore see these
+// interleaved with CSI frames. They are *not* corruption — they just need a
+// different decoder (or can be skipped). See firmware `rv_feature_state.h`.
+
+/// ADR-039 edge vitals packet (32 bytes: HR/BR/presence).
+pub const RUVIEW_VITALS_MAGIC: u32 = 0xC5110002;
+/// ADR-069 feature-vector packet.
+pub const RUVIEW_FEATURE_MAGIC: u32 = 0xC5110003;
+/// ADR-063 fused-vitals packet (multi-sensor fusion).
+pub const RUVIEW_FUSED_VITALS_MAGIC: u32 = 0xC5110004;
+/// ADR-039 compressed-CSI packet.
+pub const RUVIEW_COMPRESSED_CSI_MAGIC: u32 = 0xC5110005;
+/// ADR-081 compact feature-state packet (the default upstream payload).
+pub const RUVIEW_FEATURE_STATE_MAGIC: u32 = 0xC5110006;
+/// ADR-095 / #513 on-device temporal-classification packet.
+pub const RUVIEW_TEMPORAL_MAGIC: u32 = 0xC5110007;
+
+/// If `magic` is a recognized RuView wire packet other than the ADR-018 raw
+/// CSI frame, return a human-readable name for it; otherwise `None`.
+///
+/// Used by CSI consumers to distinguish "a sibling packet I should route or
+/// skip" from "genuine garbage on the wire".
+pub fn ruview_sibling_packet_name(magic: u32) -> Option<&'static str> {
+    match magic {
+        RUVIEW_VITALS_MAGIC => Some("ADR-039 edge vitals"),
+        RUVIEW_FEATURE_MAGIC => Some("ADR-069 feature vector"),
+        RUVIEW_FUSED_VITALS_MAGIC => Some("ADR-063 fused vitals"),
+        RUVIEW_COMPRESSED_CSI_MAGIC => Some("ADR-039 compressed CSI"),
+        RUVIEW_FEATURE_STATE_MAGIC => Some("ADR-081 feature state"),
+        RUVIEW_TEMPORAL_MAGIC => Some("ADR-095 temporal classification"),
+        _ => None,
+    }
+}
 
 /// ADR-018 header size in bytes (before I/Q data).
 const HEADER_SIZE: usize = 20;
@@ -55,6 +93,18 @@ impl Esp32CsiParser {
     /// The buffer must contain at least the header (20 bytes) plus the I/Q data.
     /// Returns the parsed frame and the number of bytes consumed.
     pub fn parse_frame(data: &[u8]) -> Result<(CsiFrame, usize), ParseError> {
+        // A recognized sibling packet (ADR-039 vitals, ADR-081 feature state, …)
+        // multiplexed onto the CSI UDP port should be reported as such — not as
+        // "insufficient data" or "invalid magic" — so callers can route or skip
+        // it. These packets are all >= 4 bytes; classify before the CSI-frame
+        // length gate. (RuView#517)
+        if data.len() >= 4 {
+            let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            if let Some(kind) = ruview_sibling_packet_name(magic) {
+                return Err(ParseError::NonCsiPacket { magic, kind });
+            }
+        }
+
         if data.len() < HEADER_SIZE {
             return Err(ParseError::InsufficientData {
                 needed: HEADER_SIZE,
@@ -65,10 +115,9 @@ impl Esp32CsiParser {
         let mut cursor = Cursor::new(data);
 
         // Magic (offset 0, 4 bytes)
-        let magic = cursor.read_u32::<LittleEndian>().map_err(|_| ParseError::InsufficientData {
-            needed: 4,
-            got: 0,
-        })?;
+        let magic = cursor
+            .read_u32::<LittleEndian>()
+            .map_err(|_| ParseError::InsufficientData { needed: 4, got: 0 })?;
 
         if magic != ESP32_CSI_MAGIC {
             return Err(ParseError::InvalidMagic {
@@ -94,10 +143,13 @@ impl Esp32CsiParser {
         }
 
         // Number of subcarriers (offset 6, 2 bytes LE)
-        let n_subcarriers = cursor.read_u16::<LittleEndian>().map_err(|_| ParseError::ByteError {
-            offset: 6,
-            message: "Failed to read subcarrier count".into(),
-        })? as usize;
+        let n_subcarriers =
+            cursor
+                .read_u16::<LittleEndian>()
+                .map_err(|_| ParseError::ByteError {
+                    offset: 6,
+                    message: "Failed to read subcarrier count".into(),
+                })? as usize;
 
         if n_subcarriers > MAX_SUBCARRIERS {
             return Err(ParseError::InvalidSubcarrierCount {
@@ -107,16 +159,21 @@ impl Esp32CsiParser {
         }
 
         // Frequency MHz (offset 8, 4 bytes LE)
-        let channel_freq_mhz = cursor.read_u32::<LittleEndian>().map_err(|_| ParseError::ByteError {
-            offset: 8,
-            message: "Failed to read frequency".into(),
-        })?;
+        let channel_freq_mhz =
+            cursor
+                .read_u32::<LittleEndian>()
+                .map_err(|_| ParseError::ByteError {
+                    offset: 8,
+                    message: "Failed to read frequency".into(),
+                })?;
 
         // Sequence number (offset 12, 4 bytes LE)
-        let sequence = cursor.read_u32::<LittleEndian>().map_err(|_| ParseError::ByteError {
-            offset: 12,
-            message: "Failed to read sequence number".into(),
-        })?;
+        let sequence = cursor
+            .read_u32::<LittleEndian>()
+            .map_err(|_| ParseError::ByteError {
+                offset: 12,
+                message: "Failed to read sequence number".into(),
+            })?;
 
         // RSSI (offset 16, 1 byte signed)
         let rssi_dbm = cursor.read_i8().map_err(|_| ParseError::ByteError {
@@ -130,11 +187,20 @@ impl Esp32CsiParser {
             message: "Failed to read noise floor".into(),
         })?;
 
-        // Reserved (offset 18, 2 bytes) — skip
-        let _reserved = cursor.read_u16::<LittleEndian>().map_err(|_| ParseError::ByteError {
+        // ADR-110: bytes 18-19 carry PPDU type + flags (previously reserved-zero,
+        // now opt-in via CONFIG_CSI_FRAME_HE_TAGGING in firmware). Pre-ADR-110
+        // firmware sends zeros, which round-trip as PpduType::HtLegacy +
+        // Adr018Flags::default() — fully backwards compatible.
+        let ppdu_byte = cursor.read_u8().map_err(|_| ParseError::ByteError {
             offset: 18,
-            message: "Failed to read reserved bytes".into(),
+            message: "Failed to read PPDU type byte".into(),
         })?;
+        let flags_byte = cursor.read_u8().map_err(|_| ParseError::ByteError {
+            offset: 19,
+            message: "Failed to read flags byte".into(),
+        })?;
+        let ppdu_type = PpduType::from_byte(ppdu_byte);
+        let adr018_flags = Adr018Flags::from_byte(flags_byte);
 
         // I/Q data: n_antennas * n_subcarriers * 2 bytes
         let iq_pair_count = n_antennas as usize * n_subcarriers;
@@ -197,6 +263,8 @@ impl Esp32CsiParser {
                     rx_antennas: n_antennas,
                 },
                 sequence,
+                ppdu_type,
+                adr018_flags,
             },
             subcarriers,
         };
@@ -245,7 +313,20 @@ mod tests {
     use super::*;
 
     /// Build a valid ADR-018 ESP32 CSI frame with known parameters.
+    /// PPDU type + flags bytes (offset 18-19) are zero — pre-ADR-110 default,
+    /// which round-trips as PpduType::HtLegacy + Adr018Flags::default().
     fn build_test_frame(node_id: u8, n_antennas: u8, subcarrier_pairs: &[(i8, i8)]) -> Vec<u8> {
+        build_test_frame_with_he(node_id, n_antennas, subcarrier_pairs, 0, 0)
+    }
+
+    /// ADR-110-aware variant: explicit byte 18 (PPDU type) and byte 19 (flags).
+    fn build_test_frame_with_he(
+        node_id: u8,
+        n_antennas: u8,
+        subcarrier_pairs: &[(i8, i8)],
+        ppdu_byte: u8,
+        flags_byte: u8,
+    ) -> Vec<u8> {
         let n_subcarriers = if n_antennas == 0 {
             subcarrier_pairs.len()
         } else {
@@ -253,32 +334,81 @@ mod tests {
         };
 
         let mut buf = Vec::new();
-
-        // Magic (offset 0)
         buf.extend_from_slice(&ESP32_CSI_MAGIC.to_le_bytes());
-        // Node ID (offset 4)
         buf.push(node_id);
-        // Number of antennas (offset 5)
         buf.push(n_antennas);
-        // Number of subcarriers (offset 6, LE u16)
         buf.extend_from_slice(&(n_subcarriers as u16).to_le_bytes());
-        // Frequency MHz (offset 8, LE u32)
         buf.extend_from_slice(&2437u32.to_le_bytes());
-        // Sequence number (offset 12, LE u32)
         buf.extend_from_slice(&1u32.to_le_bytes());
-        // RSSI (offset 16, i8)
         buf.push((-50i8) as u8);
-        // Noise floor (offset 17, i8)
         buf.push((-95i8) as u8);
-        // Reserved (offset 18, 2 bytes)
-        buf.extend_from_slice(&[0u8; 2]);
-        // I/Q data (offset 20)
+        buf.push(ppdu_byte);
+        buf.push(flags_byte);
         for (i, q) in subcarrier_pairs {
             buf.push(*i as u8);
             buf.push(*q as u8);
         }
 
         buf
+    }
+
+    // ── ADR-110: byte 18-19 round-trip tests ─────────────────────────────────
+
+    #[test]
+    fn adr110_pre_adr110_firmware_round_trips_as_ht_legacy_default_flags() {
+        // Pre-ADR-110 firmware writes zeros to bytes 18-19. The parser must
+        // surface that as HtLegacy + default flags so old aggregators see
+        // identical behavior to before the extension.
+        let data = build_test_frame(1, 1, &[(0, 0); 56]);
+        let (frame, _) = Esp32CsiParser::parse_frame(&data).unwrap();
+        assert_eq!(frame.metadata.ppdu_type, PpduType::HtLegacy);
+        assert_eq!(frame.metadata.adr018_flags, Adr018Flags::default());
+        assert!(!frame.metadata.ppdu_type.is_he());
+    }
+
+    #[test]
+    fn adr110_he_su_ppdu_decodes() {
+        let data = build_test_frame_with_he(2, 1, &[(0, 0); 56], /*PPDU*/ 1, /*flags*/ 0);
+        let (frame, _) = Esp32CsiParser::parse_frame(&data).unwrap();
+        assert_eq!(frame.metadata.ppdu_type, PpduType::HeSu);
+        assert!(frame.metadata.ppdu_type.is_he());
+    }
+
+    #[test]
+    fn adr110_he_mu_he_tb_decode() {
+        let mu = build_test_frame_with_he(3, 1, &[(0, 0); 56], 2, 0);
+        let tb = build_test_frame_with_he(4, 1, &[(0, 0); 56], 3, 0);
+        let (mu_frame, _) = Esp32CsiParser::parse_frame(&mu).unwrap();
+        let (tb_frame, _) = Esp32CsiParser::parse_frame(&tb).unwrap();
+        assert_eq!(mu_frame.metadata.ppdu_type, PpduType::HeMu);
+        assert_eq!(tb_frame.metadata.ppdu_type, PpduType::HeTb);
+    }
+
+    #[test]
+    fn adr110_unknown_ppdu_byte_decodes_as_unknown() {
+        let data = build_test_frame_with_he(5, 1, &[(0, 0); 56], 0xFF, 0);
+        let (frame, _) = Esp32CsiParser::parse_frame(&data).unwrap();
+        assert_eq!(frame.metadata.ppdu_type, PpduType::Unknown);
+    }
+
+    #[test]
+    fn adr110_flags_round_trip_all_bits() {
+        // All known flag bits set: bw40 (0x01) + STBC (0x04) + LDPC (0x08) + 15.4-sync (0x10) = 0x1D
+        let data = build_test_frame_with_he(6, 1, &[(0, 0); 56], 1, 0x1D);
+        let (frame, _) = Esp32CsiParser::parse_frame(&data).unwrap();
+        assert!(frame.metadata.adr018_flags.bw40);
+        assert!(frame.metadata.adr018_flags.stbc);
+        assert!(frame.metadata.adr018_flags.ldpc);
+        assert!(frame.metadata.adr018_flags.ieee802154_sync_valid);
+        // Round-trip the encoder
+        assert_eq!(frame.metadata.adr018_flags.to_byte(), 0x1D);
+    }
+
+    #[test]
+    fn adr110_ppdu_byte_round_trips_for_known_variants() {
+        for v in [PpduType::HtLegacy, PpduType::HeSu, PpduType::HeMu, PpduType::HeTb, PpduType::Unknown] {
+            assert_eq!(PpduType::from_byte(v.to_byte()), v, "round-trip failed for {v:?}");
+        }
     }
 
     #[test]
@@ -310,10 +440,54 @@ mod tests {
     #[test]
     fn test_parse_invalid_magic() {
         let mut data = build_test_frame(1, 1, &[(10, 20)]);
-        // Corrupt magic
-        data[0] = 0xFF;
+        // Corrupt magic to a value that isn't any known RuView packet.
+        data[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
         let result = Esp32CsiParser::parse_frame(&data);
         assert!(matches!(result, Err(ParseError::InvalidMagic { .. })));
+    }
+
+    #[test]
+    fn test_sibling_vitals_packet_is_not_invalid_magic() {
+        // RuView#517: a 32-byte ADR-039 vitals packet (magic 0xC5110002)
+        // arrives on the same UDP port as CSI frames. It must be reported as
+        // a recognized sibling packet, not a corrupt CSI frame.
+        let mut data = vec![0u8; 32];
+        data[0..4].copy_from_slice(&RUVIEW_VITALS_MAGIC.to_le_bytes());
+        match Esp32CsiParser::parse_frame(&data) {
+            Err(ParseError::NonCsiPacket { magic, kind }) => {
+                assert_eq!(magic, RUVIEW_VITALS_MAGIC);
+                assert_eq!(kind, "ADR-039 edge vitals");
+            }
+            other => panic!("expected NonCsiPacket, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_all_sibling_magics_classified() {
+        for m in [
+            RUVIEW_VITALS_MAGIC,
+            RUVIEW_FEATURE_MAGIC,
+            RUVIEW_FUSED_VITALS_MAGIC,
+            RUVIEW_COMPRESSED_CSI_MAGIC,
+            RUVIEW_FEATURE_STATE_MAGIC,
+            RUVIEW_TEMPORAL_MAGIC,
+        ] {
+            assert!(
+                ruview_sibling_packet_name(m).is_some(),
+                "{m:#010x} unclassified"
+            );
+            let mut data = vec![0u8; 24];
+            data[0..4].copy_from_slice(&m.to_le_bytes());
+            assert!(
+                matches!(
+                    Esp32CsiParser::parse_frame(&data),
+                    Err(ParseError::NonCsiPacket { .. })
+                ),
+                "{m:#010x} should parse as NonCsiPacket"
+            );
+        }
+        // The CSI magic itself is not a "sibling".
+        assert!(ruview_sibling_packet_name(ESP32_CSI_MAGIC).is_none());
     }
 
     #[test]

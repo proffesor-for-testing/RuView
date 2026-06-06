@@ -7,7 +7,9 @@
 //! score-based heuristic in `score_to_person_count`.
 
 use std::collections::VecDeque;
-use wifi_densepose_signal::ruvsense::field_model::{CalibrationStatus, FieldModel, FieldModelConfig};
+use wifi_densepose_signal::ruvsense::field_model::{
+    CalibrationStatus, FieldModel, FieldModelConfig,
+};
 
 use super::score_to_person_count;
 
@@ -18,6 +20,15 @@ const OCCUPANCY_WINDOW: usize = 50;
 const ENERGY_THRESH_2: f64 = 12.0;
 /// Perturbation energy threshold for detecting a third person.
 const ENERGY_THRESH_3: f64 = 25.0;
+
+/// Maximum occupancy a single ESP32 link can plausibly resolve (#894).
+/// The score heuristic (`score_to_person_count`) and the perturbation-energy
+/// fallback below both cap here; the eigenvalue path is bounded to match,
+/// rather than leaking its internal `min(10)` ceiling on noisy / under-
+/// calibrated CSI (the "10 persons reported when 1 present" symptom).
+/// Resolving more than this from one link's subcarrier covariance is not
+/// reliable — genuine higher counts come from the multistatic fusion path.
+const MAX_SINGLE_LINK_OCCUPANCY: usize = 3;
 
 /// Create a FieldModelConfig for single-link mode (one ESP32 node = one link).
 /// This avoids the DimensionMismatch error when feeding single-frame observations.
@@ -53,11 +64,16 @@ pub fn occupancy_or_fallback(
                 return score_to_person_count(smoothed_score, prev_count);
             }
 
-            // Try eigenvalue-based occupancy first (best accuracy).
-            match field.estimate_occupancy(&frames) {
-                Ok(count) => return count,
-                Err(_) => {} // fall through to perturbation energy
-            }
+            // Try eigenvalue-based occupancy first (best accuracy). Bound it to
+            // the same single-link maximum the sibling estimators use — the
+            // perturbation fallback below and score_to_person_count both cap at
+            // MAX_SINGLE_LINK_OCCUPANCY. Without this, estimate_occupancy's
+            // internal min(10) ceiling leaks up to 10 persons on noisy / under-
+            // calibrated CSI (#894), while every other path on the same data
+            // would report ≤3.
+            if let Ok(count) = field.estimate_occupancy(&frames) {
+                return count.min(MAX_SINGLE_LINK_OCCUPANCY);
+            } // else fall through to perturbation energy
 
             // Fallback: perturbation energy thresholds.
             // FieldModel expects [n_links][n_subcarriers] — we use n_links=1.
@@ -112,10 +128,16 @@ pub fn parse_node_positions(input: &str) -> Vec<[f32; 3]> {
         .filter_map(|(idx, triplet)| {
             let parts: Vec<&str> = triplet.split(',').collect();
             if parts.len() != 3 {
-                tracing::warn!("Skipping malformed node position entry {idx}: '{triplet}' (expected x,y,z)");
+                tracing::warn!(
+                    "Skipping malformed node position entry {idx}: '{triplet}' (expected x,y,z)"
+                );
                 return None;
             }
-            match (parts[0].parse::<f32>(), parts[1].parse::<f32>(), parts[2].parse::<f32>()) {
+            match (
+                parts[0].parse::<f32>(),
+                parts[1].parse::<f32>(),
+                parts[2].parse::<f32>(),
+            ) {
                 (Ok(x), Ok(y), Ok(z)) => Some([x, y, z]),
                 _ => {
                     tracing::warn!("Skipping unparseable node position entry {idx}: '{triplet}'");

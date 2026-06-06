@@ -1,6 +1,6 @@
 [package]
 name = "wifi-densepose-train"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["rUv <ruv@ruv.net>", "WiFi-DensePose Contributors"]
 license = "MIT OR Apache-2.0"
@@ -19,6 +19,13 @@ path = "src/bin/train.rs"
 name = "verify-training"
 path = "src/bin/verify_training.rs"
 required-features = ["tch-backend"]
+
+# AetherArena (ADR-149) deterministic score runner — the CI harness-gate entry
+# point. Pure ruview_metrics (ndarray + sha2), no torch, so it builds and runs
+# under --no-default-features for a fast, GPU-free PR gate.
+[[bin]]
+name = "aa_score_runner"
+path = "src/bin/aa_score_runner.rs"
 
 [features]
 default = []
@@ -85,6 +92,11 @@ criterion.workspace = true
 proptest.workspace = true
 tempfile = "3.10"
 approx = "0.5"
+# Used by tests/test_real_loader.rs to write .npy fixtures that exercise the
+# real MmFiDataset disk-loading path (the deterministic proof uses the
+# in-memory SyntheticCsiDataset, which bypasses .npy parsing).
+ndarray.workspace = true
+ndarray-npy.workspace = true
 
 [[bench]]
 name = "training_bench"

@@ -10,11 +10,14 @@ use std::net::UdpSocket;
 use std::process;
 
 use clap::Parser;
-use wifi_densepose_hardware::Esp32CsiParser;
+use wifi_densepose_hardware::{Esp32CsiParser, ParseError};
 
 /// UDP aggregator for ESP32 CSI nodes (ADR-018).
 #[derive(Parser)]
-#[command(name = "aggregator", about = "Receive and display live CSI frames from ESP32 nodes")]
+#[command(
+    name = "aggregator",
+    about = "Receive and display live CSI frames from ESP32 nodes"
+)]
 struct Cli {
     /// Address:port to bind the UDP listener to.
     #[arg(long, default_value = "0.0.0.0:5005")]
@@ -64,6 +67,15 @@ fn main() {
                     frame.metadata.rssi_dbm,
                     mean_amp,
                 );
+            }
+            // The firmware sends several packet types on this UDP port
+            // (ADR-039 vitals, ADR-081 feature state, ADR-095 temporal, …)
+            // alongside ADR-018 CSI frames. Those are expected, not errors —
+            // this CSI-only aggregator just skips them. (RuView#517)
+            Err(ParseError::NonCsiPacket { kind, .. }) => {
+                if cli.verbose {
+                    eprintln!("  [skipped {} packet — not a CSI frame]", kind);
+                }
             }
             Err(e) => {
                 if cli.verbose {

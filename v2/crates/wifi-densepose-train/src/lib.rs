@@ -51,6 +51,7 @@ pub mod eval;
 pub mod geometry;
 pub mod rapid_adapt;
 pub mod ruview_metrics;
+pub mod signal_features;
 pub mod subcarrier;
 pub mod virtual_aug;
 
@@ -66,22 +67,27 @@ pub mod metrics;
 pub mod model;
 #[cfg(feature = "tch-backend")]
 pub mod proof;
+
+/// ADR-145 — ablation evaluation harness (feature matrix + privacy/latency metrics).
+pub mod ablation;
 #[cfg(feature = "tch-backend")]
 pub mod trainer;
 
 // Convenient re-exports at the crate root.
 pub use config::TrainingConfig;
-pub use dataset::{CsiDataset, CsiSample, DataLoader, MmFiDataset, SyntheticCsiDataset, SyntheticConfig};
+pub use dataset::{
+    CsiDataset, CsiSample, DataLoader, MmFiDataset, SyntheticConfig, SyntheticCsiDataset,
+};
 pub use error::{ConfigError, DatasetError, SubcarrierError, TrainError};
 // TrainResult<T> is the generic Result alias from error.rs; the concrete
 // TrainResult struct from trainer.rs is accessed via trainer::TrainResult.
 pub use error::TrainResult as TrainResultAlias;
-pub use subcarrier::{compute_interp_weights, interpolate_subcarriers, select_subcarriers_by_variance};
+pub use subcarrier::{
+    compute_interp_weights, interpolate_subcarriers, select_subcarriers_by_variance,
+};
 
 // MERIDIAN (ADR-027) re-exports.
-pub use domain::{
-    AdversarialSchedule, DomainClassifier, DomainFactorizer, GradientReversalLayer,
-};
+pub use domain::{AdversarialSchedule, DomainClassifier, DomainFactorizer, GradientReversalLayer};
 pub use eval::CrossDomainEvaluator;
 pub use geometry::{FilmLayer, FourierPositionalEncoding, GeometryEncoder, MeridianGeometryConfig};
 pub use rapid_adapt::{AdaptError, AdaptationLoss, AdaptationResult, RapidAdaptation};
