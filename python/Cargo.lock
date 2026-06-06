@@ -794,7 +794,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-bfld"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "crc",
@@ -806,8 +806,9 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
+ "blake3",
  "chrono",
  "ndarray 0.17.2",
  "num-complex",

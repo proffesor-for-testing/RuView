@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx agentic-qe hooks guard --file \"$TOOL_INPUT_file_path\" --json",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" guard --file \"$TOOL_INPUT_file_path\" --json",
             "timeout": 3000,
             "continueOnError": true
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx agentic-qe hooks pre-edit --file \"$TOOL_INPUT_file_path\" --json",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" pre-edit --file \"$TOOL_INPUT_file_path\" --json",
             "timeout": 5000,
             "continueOnError": true
           }
@@ -28,18 +28,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx agentic-qe hooks pre-command --command \"$TOOL_INPUT_command\" --json",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" pre-command --command \"$TOOL_INPUT_command\" --json",
             "timeout": 3000,
             "continueOnError": true
           }
         ]
       },
       {
-        "matcher": "^Task$",
+        "matcher": "^(Task|Agent)$",
         "hooks": [
           {
             "type": "command",
-            "command": "npx agentic-qe hooks pre-task --description \"$TOOL_INPUT_prompt\" --json",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" pre-task --description \"$TOOL_INPUT_prompt\" --json",
             "timeout": 5000,
             "continueOnError": true
           }
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx agentic-qe hooks post-edit --file \"$TOOL_INPUT_file_path\" --success --json",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" post-edit --file \"$TOOL_INPUT_file_path\" --success --json",
             "timeout": 5000,
             "continueOnError": true
           }
@@ -63,18 +63,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx agentic-qe hooks post-command --command \"$TOOL_INPUT_command\" --success --json",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" post-command --command \"$TOOL_INPUT_command\" --success true --json",
             "timeout": 5000,
             "continueOnError": true
           }
         ]
       },
       {
-        "matcher": "^Task$",
+        "matcher": "^(Task|Agent)$",
         "hooks": [
           {
             "type": "command",
-            "command": "npx agentic-qe hooks post-task --task-id \"$TOOL_RESULT_agent_id\" --success --json",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" post-task --task-id \"$TOOL_RESULT_agent_id\" --agent \"$TOOL_INPUT_subagent_type\" --success true --description \"$TOOL_INPUT_prompt\" --json",
             "timeout": 5000,
             "continueOnError": true
           }
@@ -86,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx agentic-qe hooks route --task \"$PROMPT\" --json",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" route --json",
             "timeout": 5000,
             "continueOnError": true
           }
@@ -98,7 +98,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx agentic-qe hooks session-start --session-id \"$SESSION_ID\" --json",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" session-start --session-id \"$SESSION_ID\" --json",
             "timeout": 10000,
             "continueOnError": true
           }
@@ -120,7 +120,17 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx agentic-qe hooks session-end --save-state --json",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" session-end --save-state --json",
+            "timeout": 5000,
+            "continueOnError": true
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/aqe-hook.cjs\" post-route --success true --json",
             "timeout": 5000,
             "continueOnError": true
           }
@@ -221,7 +231,7 @@
     "AQE_LEARNING_ENABLED": "true",
     "AQE_V3_MODE": "true",
     "AQE_V3_DDD_ENABLED": "true",
-    "AQE_V3_DOMAINS": "test-generation,test-execution,coverage-analysis,quality-assessment,defect-intelligence,requirements-validation,code-intelligence,security-compliance,contract-testing,visual-accessibility,chaos-resilience,learning-optimization,enterprise-integration",
+    "AQE_V3_DOMAINS": "test-generation,test-execution,coverage-analysis,quality-assessment,defect-intelligence,requirements-validation,code-intelligence,security-compliance,contract-testing,visual-accessibility,chaos-resilience,learning-optimization",
     "AQE_V3_SWARM_SIZE": "15",
     "AQE_V3_TOPOLOGY": "hierarchical",
     "AQE_V3_SUBLINEAR_ENABLED": "true",
@@ -362,14 +372,14 @@
     }
   },
   "aqe": {
-    "version": "3.9.16",
-    "initialized": "2026-04-26T13:31:31.712Z",
+    "version": "3.10.3",
+    "initialized": "2026-06-06T09:11:40.339Z",
     "hooksConfigured": true
   },
   "includeCoAuthoredBy": true,
   "v3Configuration": {
     "domains": {
-      "total": 13,
+      "total": 12,
       "names": [
         "test-generation",
         "test-execution",
@@ -382,8 +392,7 @@
         "contract-testing",
         "visual-accessibility",
         "chaos-resilience",
-        "learning-optimization",
-        "enterprise-integration"
+        "learning-optimization"
       ]
     },
     "swarm": {
