@@ -62,7 +62,26 @@ Two nodes, 120 s empty-room baseline (per-node mean + top-K SVD environmental mo
 | **occupied — STILL** | 39 | 88 | **88** | **10×** |
 | occupied — moving | 495 | 564 | 564 | 66× |
 
-(K=8; the still-person margin holds 8–10× at K=12/16.) **A still, breathing person is detected at ~8–10× the empty baseline; a moving person at ~60×.** A threshold of ~15–20 separates cleanly with wide margin. The empty-room baseline ("empty is important") is what makes the perturbation pop out of the environmental modes, and multi-node gives the **spatial coverage** that a single node lacks for a still subject.
+(K=8; held at K=12/16.) Moving person ~60×. **⚠️ See §1.4 — the "still ~10×" reading here did NOT hold up under controlled testing.**
+
+### 1.4 Correction — controlled on-seed test (the residual detects MOTION, not static presence)
+
+The numbers above were captured on a Mac collector with ~30–40 s "occupied still" windows. A **controlled test on a real seed** (cognitum-8b40, Pi armv7l; explicit empty-baseline calibration with the subject fully out of the room; then subject seated close + still, timing strictly controlled) corrected the interpretation:
+
+```
+arrival / settling (sitting down):  node1 2.8 → 3.8 → 3.9×   present=TRUE
+held truly still ~15 s:             node1 0.7× (BELOW empty floor)  present=FALSE 14/14
+```
+
+**The implemented residual energy `‖(x−mean) − VkVkᵀ(x−mean)‖²` is a variation/motion measure.** A motionless body settles into a *stable, low-variation* CSI state whose residual decays back to — even below — the empty baseline. The earlier "still ~8–10×" almost certainly captured **settling + micro-motion**, not sustained stillness.
+
+**Honest verdict:**
+- ✅ **Motion / arrival / movement is detected robustly** on real hardware (on-seed 2.8–3.9× close, ~60× moving), with a fresh empty baseline.
+- ❌ **A truly still person fades** (residual is variation-driven).
+- **Fresh calibration is essential** — a stale baseline (RF drift between calibration and use) understates the signal; the on-seed test only worked after a fresh empty-room calibration (validates the ADR-030 persistent-field-model + drift handling, and the explicit-calibration UX).
+- → **Sustained still-person presence requires the breathing-band approach** (detect the *periodic* breathing modulation, which persists when motionless), not raw residual energy. This is now a proven requirement, not a hypothesis.
+
+Raw data: `docs/adr/data/ADR-151-presence-field-model/onseed_controlled_test.log`.
 
 ---
 
@@ -75,7 +94,8 @@ Two nodes, 120 s empty-room baseline (per-node mean + top-K SVD environmental mo
 1. **Empty-room calibration** (explicit, ≥~2 min unoccupied): per node, accumulate CSI amplitude → baseline mean + covariance; SVD → top-K environmental eigenmodes; record the empty residual noise floor (the ADR-030 / #942 anchor).
 2. **Runtime**: per node, `residual = (obs − mean) − V_k V_kᵀ (obs − mean)`; `residual_energy = ‖residual‖²` averaged over a short window.
 3. **Occupancy/presence**: `present = max_over_nodes(residual_energy) > T`, with `T` anchored to the empty baseline (e.g. ~5–10× the empty residual). Reuse `estimate_occupancy`'s Marčenko–Pastur anchoring for the threshold rather than a hand-tuned constant.
-4. **Latch** presence for a short hold time after detection (smooths a still-after-moving subject; complements the still-person sensitivity).
+4. **Latch** presence for a short hold time after detection (bridges a still-after-moving subject). NOTE: latching only bridges seconds — a person who stays motionless for longer un-latches, because the residual is motion-driven (§1.4). Robust static presence needs the breathing-band detector below.
+5. **Breathing-band detector (required for static presence, §1.4):** on the residual time-series, detect the *periodic* ~0.1–0.5 Hz breathing modulation (autocorrelation / spectral-peak prominence), which persists for a motionless person. This — not raw residual energy — is what sustains presence for a still subject.
 
 ### 2.2 Where it runs
 
@@ -90,7 +110,7 @@ An explicit **"learn empty room"** step at setup (the user leaves for ~2 min). B
 ## 3. Consequences
 
 **Positive**
-- Reliable presence for a **still** person (device-proven 8–10× margin), which single-node cannot achieve.
+- Reliable presence for a **moving / recently-arrived** person on real hardware (on-seed 2.8–3.9× close, ~60× moving). **Sustained still-person presence is NOT yet achieved** by the residual alone — it needs the breathing-band extension (§1.4).
 - Reuses the existing field-model machinery and the contrastive/topological paradigm (ADR-024/029/030) instead of a brittle scalar threshold.
 - Keeps the safety rule intact (no fabricated presence): empty stays clearly below threshold.
 
