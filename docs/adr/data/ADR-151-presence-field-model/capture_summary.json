@@ -1,0 +1,32 @@
+{
+  "baseline": {
+    "1": {
+      "frames": 1135,
+      "rssi_mean": -35.0
+    },
+    "2": {
+      "frames": 1160,
+      "rssi_mean": -34.0
+    }
+  },
+  "occmoving": {
+    "2": {
+      "frames": 287,
+      "rssi_mean": -33.1
+    },
+    "1": {
+      "frames": 282,
+      "rssi_mean": -35.0
+    }
+  },
+  "occstill": {
+    "2": {
+      "frames": 385,
+      "rssi_mean": -31.9
+    },
+    "1": {
+      "frames": 386,
+      "rssi_mean": -30.0
+    }
+  }
+}

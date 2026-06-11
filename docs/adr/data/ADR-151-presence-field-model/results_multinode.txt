@@ -1,0 +1,18 @@
+=== multi-node residual occupancy (K=8 modes removed per node) ===
+capture      node1  node2   MAX     MEAN
+test_empty     8.3    8.5      8.5     8.4  (1.00x empty)
+occstill      39.3   88.3     88.3    63.8  (10.40x empty)
+occmoving    494.8  564.4    564.4   529.6  (66.48x empty)
+
+=== multi-node residual occupancy (K=12 modes removed per node) ===
+capture      node1  node2   MAX     MEAN
+test_empty     7.2    7.6      7.6     7.4  (1.00x empty)
+occstill      37.0   65.2     65.2    51.1  (8.59x empty)
+occmoving    268.3  459.2    459.2   363.8  (60.46x empty)
+
+=== multi-node residual occupancy (K=16 modes removed per node) ===
+capture      node1  node2   MAX     MEAN
+test_empty     6.2    6.9      6.9     6.6  (1.00x empty)
+occstill      24.4   56.2     56.2    40.3  (8.16x empty)
+occmoving    173.2  390.2    390.2   281.7  (56.64x empty)
+
